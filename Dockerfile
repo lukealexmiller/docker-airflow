@@ -1,11 +1,11 @@
 # VERSION 1.8.1
-# AUTHOR: Matthieu "Puckel_" Roisil
+# AUTHOR: Luke Miller - Adapted from Matthieu "Puckel_" Roisil
 # DESCRIPTION: Basic Airflow container
 # BUILD: docker build --rm -t puckel/docker-airflow .
-# SOURCE: https://github.com/puckel/docker-airflow
+# SOURCE: https://github.com/lukealexmiller/docker-airflow
 
 FROM debian:jessie
-MAINTAINER Puckel_
+MAINTAINER lukealexmiller
 
 # Never prompts the user for choices on installation/configuration of packages
 ENV DEBIAN_FRONTEND noninteractive
