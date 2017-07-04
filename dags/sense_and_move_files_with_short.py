@@ -9,8 +9,6 @@ from airflow.operators.bash_operator import BashOperator
 from airflow.operators import ShortCircuitOperator
 from airflow.operators.python_operator import PythonOperator
 
-#TODO: Where can the short circuits go? Or will the process need stopping without new data? TF in separate container?
-
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
@@ -63,6 +61,14 @@ def list_jpeg_on_server(*args, **kwargs):
     raw_data_server_files = [val for sublist in [[os.path.join(i[0].replace(raw_data_server_dir+"/",""), j) for j in i[2]] for i in os.walk(raw_data_server_dir)] for val in sublist]
     return raw_data_server_files
 
+def check_limit_jpeg_on_server(*args, **kwargs):
+    max_num_server = kwargs["max_num_server"]
+    ti = kwargs['task_instance']
+    raw_data_server_files = ti.xcom_pull(task_ids='list_jpeg_on_server')
+    if len(raw_data_server_files)>max_num_server:
+        return False
+    return True
+
 
 def split_video_to_jpeg_write_to_server(*args, **kwargs):
     """Decode video file and extract frames.
@@ -98,6 +104,13 @@ t_list_jpeg_on_server = PythonOperator(
         op_kwargs={'source_location': '/usr/local/airflow/server'},
         dag=dag)
 
+t_check_limit_jpeg_on_server = ShortCircuitOperator(
+        task_id='check_limit_jpeg_on_server',
+        python_callable=check_limit_jpeg_on_server,
+        provide_context=True,
+        op_kwargs={'max_num_server': 100},
+        dag=dag)
+
 t_split_to_jpeg_write_to_server = PythonOperator(
         task_id='split_video_to_jpeg',
         python_callable=split_video_to_jpeg_write_to_server,
@@ -106,19 +119,7 @@ t_split_to_jpeg_write_to_server = PythonOperator(
                    'target_location': '/usr/local/airflow/server'},
         dag=dag)
 
-t_face_blur = DockerOperator(
-        api_version='1.27',
-        docker_url='tcp://localhost:2375',  # replace it with swarm/docker endpoint
-        image='lukemiller/docker_devenvs:tensorflow_frcnn_faceblurapi',
-        network_mode='bridge',  # place on same network as airflow?
-        volumes=['/your/host/input_dir/path:/your/input_dir/path',
-                 '/your/host/output_dir/path:/your/output_dir/path'],
-        command='./face_blur.sh',
-        task_id='tensorflow_face_blur_processor',
-        xcom_push=True,
-        params={'source_location': '/usr/local/airflow/server',
-                'target_location': '/usr/local/airflow/server'},
-        dag=dag)
-
 t_move_new_data_to_syno.set_upstream([t_check_new_data_available])
-t_split_to_jpeg_write_to_server.set_upstream([t_move_new_data_to_syno,t_list_jpeg_on_server])
+t_list_jpeg_on_server.set_upstream([t_move_new_data_to_syno])
+t_check_limit_jpeg_on_server.set_upstream([t_list_jpeg_on_server])
+t_split_to_jpeg_write_to_server.set_upstream([t_check_limit_jpeg_on_server])
