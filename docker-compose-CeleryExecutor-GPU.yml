@@ -13,7 +13,7 @@ services:
             - POSTGRES_DB=airflow
 
     webserver:
-        image: lukealexmiller/docker-airflow:1.8.1
+        image: lukealexmiller/docker-airflow-gpu:1.8.1
         restart: always
         depends_on:
             - postgres
@@ -26,17 +26,19 @@ services:
             # - POSTGRES_PASSWORD=airflow
             # - POSTGRES_DB=airflow
         volumes:
+#            - nvidia_driver:/usr/local/nvidia/:ro
             - ./dags:/usr/local/airflow/dags
             - ./plugins:/usr/local/airflow/plugins
             - ./hdd:/usr/local/airflow/hdd
-            - ./syno:/usr/local/airflow/syno
-            - ./server:/usr/local/airflow/server
+            - syno_raw_data:/usr/local/airflow/syno/raw_data
+            - syno_anon_data:/usr/local/airflow/syno/anon_data
+            - tmp:/usr/local/airflow/server
         ports:
             - "8080:8080"
         command: webserver
 
     flower:
-        image: lukealexmiller/docker-airflow:1.8.1
+        image: lukealexmiller/docker-airflow-gpu:1.8.1
         restart: always
         depends_on:
             - redis
@@ -47,16 +49,18 @@ services:
         command: flower
 
     scheduler:
-        image: lukealexmiller/docker-airflow:1.8.1
+        image: lukealexmiller/docker-airflow-gpu:1.8.1
         restart: always
         depends_on:
             - webserver
         volumes:
+#            - nvidia_driver:/usr/local/nvidia/:ro
             - ./dags:/usr/local/airflow/dags
             - ./plugins:/usr/local/airflow/plugins
             - ./hdd:/usr/local/airflow/hdd
-            - ./syno:/usr/local/airflow/syno
-            - ./server:/usr/local/airflow/server
+            - syno_raw_data:/usr/local/airflow/syno/raw_data
+            - syno_anon_data:/usr/local/airflow/syno/anon_data
+            - tmp:/usr/local/airflow/server
         environment:
             - LOAD_EX=n
             - FERNET_KEY=hBz78Go3mJRJoHsD7Hsv6u7mu0Q4x74IYbMUhlZ1avI=
@@ -67,16 +71,19 @@ services:
         command: scheduler
 
     worker:
-        image: lukealexmiller/docker-airflow:1.8.1
+        image: lukealexmiller/docker-airflow-gpu:1.8.1
         restart: always
         depends_on:
             - scheduler
         volumes:
+#            - nvidia_driver:/usr/local/nvidia/:ro
             - ./dags:/usr/local/airflow/dags
             - ./plugins:/usr/local/airflow/plugins
             - ./hdd:/usr/local/airflow/hdd
-            - ./syno:/usr/local/airflow/syno
-            - ./server:/usr/local/airflow/server
+            - syno_raw_data:/usr/local/airflow/syno/raw_data
+            - syno_anon_data:/usr/local/airflow/syno/anon_data
+            - tmp:/usr/local/airflow/server
+            - ./weights:/usr/local/airflow/faster_rcnn/weights
         environment:
             - FERNET_KEY=hBz78Go3mJRJoHsD7Hsv6u7mu0Q4x74IYbMUhlZ1avI=
             - EXECUTOR=Celery
@@ -87,4 +94,14 @@ services:
 
 volumes:
     db-data:
+        driver: local
+    syno_raw_data: 
+        driver: cifs
+        driver_opts:
+            share:  syno.fritz.box/raw_data       
+    syno_anon_data: 
+        driver: cifs
+        driver_opts:
+            share:  syno.fritz.box/anon_data
+    tmp:
         driver: local

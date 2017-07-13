@@ -3,8 +3,8 @@
 # DESCRIPTION: Basic Airflow container
 # BUILD: docker build --rm -t puckel/docker-airflow .
 # SOURCE: https://github.com/lukealexmiller/docker-airflow
-#tensorflow_frcnn
-FROM lukemiller/docker_devenvs:tensorflow_faceblur 
+
+FROM debian:jessie
 MAINTAINER lukealexmiller
 
 # Never prompts the user for choices on installation/configuration of packages
@@ -51,7 +51,6 @@ RUN set -ex \
     && useradd -ms /bin/bash -d ${AIRFLOW_HOME} airflow \
     && python -m pip install -U pip \
     && pip install Cython \
-    && pip install setuptools \
     && pip install pytz \
     && pip install pyOpenSSL \
     && pip install ndg-httpsclient \
@@ -72,8 +71,6 @@ COPY script/entrypoint.sh /entrypoint.sh
 COPY config/airflow.cfg ${AIRFLOW_HOME}/airflow.cfg
 
 RUN chown -R airflow: ${AIRFLOW_HOME}
-
-RUN mv /root/faster_rcnn $AIRFLOW_HOME
 
 EXPOSE 8080 5555 8793
 

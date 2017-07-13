@@ -1,6 +1,11 @@
 import os
 import shutil
 import logging
+import cv2
+import distutils.core
+from subprocess import Popen, STDOUT, PIPE
+import time
+import signal
 
 import airflow
 from airflow import DAG
@@ -8,8 +13,6 @@ from datetime import datetime, timedelta
 from airflow.operators.bash_operator import BashOperator
 from airflow.operators import ShortCircuitOperator
 from airflow.operators.python_operator import PythonOperator
-
-#TODO: Where can the short circuits go? Or will the process need stopping without new data? TF in separate container?
 
 default_args = {
     'owner': 'airflow',
@@ -19,106 +22,397 @@ default_args = {
     'email_on_failure': False,
     'email_on_retry': False,
     'retries': 1,
-    'retry_delay': timedelta(minutes=5),
+    'retry_delay': timedelta(minutes=1),
 }
+
+# Define DAG scheduling
 dag = DAG(
-        dag_id='anonymiser_pipeline',
+        dag_id='anonymization_pipeline',
         default_args=default_args,
-        schedule_interval=timedelta(minutes=1))
+        schedule_interval='@once')
 
+"""Python functions and Bash commands defined below are called by the task 
+   operators forming the nodes on the DAG.
+"""
 
-def identify_raw_data_to_copy(*args, **kwargs):
-    raw_data_hdd_dir = kwargs["source_location"]
-    logging.info('Accessing raw data on HDD at: {}'.format(raw_data_hdd_dir))
-    raw_data_syno_dir = kwargs["target_location"]
-    logging.info('Accessing raw data on Synology at: {}'.format(raw_data_syno_dir))
-    valid_extension = kwargs["extension"]
-
-    # Create flattened list of all files in raw_data dirs and their subdirectories
-    raw_data_hdd_files = [val for sublist in [[os.path.join(i[0].replace(raw_data_hdd_dir+"/",""), j) for j in i[2]] for i in os.walk(raw_data_hdd_dir)] for val in sublist]
-    raw_data_syno_files = [val for sublist in [[os.path.join(i[0].replace(raw_data_syno_dir+"/",""), j) for j in i[2]] for i in os.walk(raw_data_syno_dir)] for val in sublist]
-
-    # Filter for files which have not already been moved to the synology
-    raw_data_to_move = list(set(raw_data_hdd_files).difference(raw_data_syno_files))
-    # Filter for files with correct extension
-    logging.info('Filtering files for those with extension: {}'.format(valid_extension))
-    raw_data_to_move = [file for file in raw_data_to_move if file.endswith(valid_extension)]
-    return raw_data_to_move
-
-
-def move_data_syno(*args, **kwargs):
-    raw_data_hdd_dir = kwargs["source_location"]
-    raw_data_syno_dir = kwargs["target_location"]
-    ti = kwargs['task_instance']
-    logging.info('Connected to XCOM {}'.format(ti))
-    raw_data_to_move = ti.xcom_pull(task_ids='sense_raw_data_hdd')
-    logging.info('Moving files: {}'.format(map(lambda x: x, raw_data_to_move)))
-
-    # Move files which do not currently exist on the synology
-    [shutil.move(os.path.join(raw_data_hdd_dir,file), os.path.join(raw_data_syno_dir,file)) for file in raw_data_to_move if not os.path.exist(os.path.join(raw_data_syno_dir,file))]
-
-
-def list_jpeg_on_server(*args, **kwargs):
-    raw_data_server_dir = kwargs["source_location"]
-    raw_data_server_files = [val for sublist in [[os.path.join(i[0].replace(raw_data_server_dir+"/",""), j) for j in i[2]] for i in os.walk(raw_data_server_dir)] for val in sublist]
-    return raw_data_server_files
-
-
-def split_video_to_jpeg_write_to_server(*args, **kwargs):
-    """Decode video file and extract frames.
+def list_files(*args, **kwargs):
+    """Return list of paths to files in a specified directory. Note that the 
+       base directory path is omitted from the list of returned paths.
     """
-    raw_data_syno_dir = kwargs["source_location"]
-    raw_data_server_dir = kwargs["target_location"]
+    source_dir = kwargs["source_location"]
+    # Create flattened list of all files in source dir and subdirectories and remove source_dir #.replace(source_dir+"/","")
+    source_dir_files = [val for sublist in [[os.path.join(i[0], j) for j in i[2]] for i in os.walk(source_dir)] for val in sublist]
+    return source_dir_files
+
+def diff_directories(*args, **kwargs):
+    """Compare two directories which are passed by the task and return a list
+       of file paths which have a specific extension and are unique to the 
+       source directory.
+    """
+    source_dir = kwargs["source_location"]
+    logging.info('Accessing source directory at: {}'.format(source_dir))
+    target_dir = kwargs["target_location"]
+    logging.info('Accessing target directory at: {}'.format(target_dir))
+
+    valid_extension = kwargs["extension"]
+    ignore_dirs = kwargs["ignore_location"]
+
+    # Get flattened list of all files in source and target dirs and their subdirectories
+    source_dir_files = list_files(**{'source_location':source_dir})
+    source_dir_files = [file.replace(source_dir+"/","") for file in source_dir_files]
+    [logging.info("{}".format(file)) for file in source_dir_files] #TODO: Remove
+    
+    target_dir_files = list_files(**{'source_location':target_dir})
+    target_dir_files = [file.replace(target_dir+"/","") for file in target_dir_files]
+    [logging.info("{}".format(file)) for file in target_dir_files] # TODO: Remove
+
+    # Filter for files which are unique to the source dir
+    logging.info('Filtering for files unique to source directory')
+    source_dir_files_unique = list(set(source_dir_files).difference(target_dir_files))
+    logging.info('Number of unique files: {}'.format(len(source_dir_files_unique)))
+
+    # Filter for files with correct extension
+    logging.info('Filtering for files with extension: {}'.format(valid_extension))
+    source_dir_files_unique = [file for file in source_dir_files_unique if file.endswith(valid_extension)]
+    logging.info('Number of passing files: {}'.format(len(source_dir_files_unique)))
+
+    # Filter out files in the ignore dirs
+    logging.info('Filtering out files in ignored directory: {}'.format(','.join(ignore_dirs)))
+    source_dir_files_unique = [file for ignore_dir in ignore_dirs for file in source_dir_files_unique if ignore_dir not in file]
+    logging.info('Number of passing files: {}'.format(len(source_dir_files_unique)))
+    
+    return source_dir_files_unique
+
+def copy_and_delete_files(source_dir, target_dir, file_path):
+    """Copy file at source_dir/file_path to target_dir/file_path.
+    """
+    source_file = os.path.join(source_dir, file_path)
+    target_file = os.path.join(target_dir, file_path)
+    if not os.path.exists(target_file):
+        if not os.path.exists(os.path.dirname(target_file)):
+            os.makedirs(os.path.dirname(target_file))
+        shutil.copyfile(source_file, target_file)
+        os.remove(source_file)
+
+def move_files(*args, **kwargs):
+    """Move files from source directory to target directory. The list of files
+       which are to be moved are generated by diff_directories and are pulled 
+       in to the function as a list using XCOM from a user-defined task_id.
+       TODO: Empty directories are not deleted.
+    """
+    source_dir = kwargs["source_location"]
+    logging.info('Accessing source directory at: {}'.format(source_dir))
+    target_dir = kwargs["target_location"]
+    logging.info('Accessing target directory at: {}'.format(target_dir))
+    task_id = kwargs["task_id"]
+
+    ti = kwargs['task_instance']
+    files_to_move = ti.xcom_pull(task_ids=task_id)
+    logging.info("Number of files to move: {}".format(len(files_to_move)))
+
+    # Move files from source dir which do not currently exist on target dir
+    [copy_and_delete_files(source_dir,target_dir,file) for file in files_to_move]
+    logging.info("File transfer complete")
+
+
+def split_video_to_jpeg_write_to_server_cv2(*args, **kwargs):
+    """Decode video file, extract frames and write to jpeg on server.
+    TODO: Pull the jpeg counting into this?
+    """
+    source_dir = kwargs["source_location"]
+    target_dir = kwargs["target_location"]
+    n_jpeg_threshold = kwargs['n_jpeg_threshold']
+
     ti = kwargs['task_instance']
     raw_data_server_files = ti.xcom_pull(task_ids='list_jpeg_on_server')
+    unanon_files = ti.xcom_pull(task_ids='sense_unanon_data_syno')
+    [logging.info("{}".format(file)) for file in unanon_files]
+
+    logging.info('{}'.format(source_dir))
+    logging.info('{}'.format(target_dir))
+    source_file_path = os.path.join(source_dir,unanon_files[0]) #TODO: How to get a different file? unanon_files[0]
+    logging.info('{}'.format(os.path.join(target_dir,unanon_files[0])))
+    target_file_path = os.path.splitext(os.path.join(target_dir,unanon_files[0]))[0]
+
+    # cv2.imwrite() cannot make directories, so we make them if they do not already exist
+    logging.info('Target directory: {}'.format(target_file_path))
+    if not os.path.exists(target_file_path):
+        logging.info('Creating directory')
+        os.makedirs(target_file_path)
+
     logging.info("Number of files currently on the server: {}".format(len(raw_data_server_files)))
-    logging.info("Splitting to jpeg.")
-    return
+
+    if len(raw_data_server_files) <= n_jpeg_threshold:
+        logging.info("Converting video file: {}".format(source_file_path))
+        # Open video stream, extracting frames, resizing and saving to server.
+        capture = cv2.VideoCapture(source_file_path)
+        logging.info("Total number of frames: {}".format(capture.get(7)))
+        count = 0
+        while capture.isOpened():
+            success, image = capture.read()
+            if success:
+                cv2.imwrite(os.path.join(target_file_path,'{0:06}.jpg'.format(count)), image)
+                count += 1
+            else:
+                logging.info("Extraction of frame {} from video file failed!".format(count))
+                capture.release()
+
+        logging.info("Number of files written to the server: {0:d}".format(count+1))
+
+    else:
+        logging.info("Warning! Number of files currently on the server exceeds threshold of {}".format(n_jpeg_threshold))
+        return False
+
+    return target_file_path
+
+def split_video_to_jpeg_write_to_server(*args, **kwargs):
+    """Decode video file, extract frames and write to jpeg on server.
+    TODO: Pull the jpeg counting into this?
+    """
+    source_dir = kwargs["source_location"]
+    target_dir = kwargs["target_location"]
+    n_jpeg_threshold = kwargs['n_jpeg_threshold']
+
+    ti = kwargs['task_instance']
+    raw_data_server_files = ti.xcom_pull(task_ids='list_jpeg_on_server')
+    unanon_files = ti.xcom_pull(task_ids='sense_unanon_data_syno')
+
+    [logging.info("{}".format(file)) for file in unanon_files]
+
+    source_file_path = os.path.join(source_dir,unanon_files[0]) #TODO: How to get a different file? unanon_files[0]
+    target_file_path = os.path.join(target_dir,unanon_files[0])
+    target_file_path = os.path.splitext(target_file_path)[0]
+
+    logging.info("Number of files currently on the server: \
+        {}".format(len(raw_data_server_files)))
+
+    if len(raw_data_server_files) > n_jpeg_threshold:
+        logging.info("Warning! Number of files currently on the server \
+            exceeds threshold of {}".format(n_jpeg_threshold))
+        return 
+
+    logging.info("Converting video file: {}".format(source_file_path))
+    logging.info("Extracting jpegs to: {}".format(target_file_path))
+    if not os.path.exists(target_file_path):
+        logging.info('Creating directory')
+        os.makedirs(target_file_path)
+
+    # Open video stream, extracting frames, resizing and saving to server.
+    bash_command = 'ffmpeg \
+    -i {source_file_path} \
+    -s 1280x720 \
+    -f image2 \
+    {target_file_path}/%06d.jpg'.format(**{'source_file_path':source_file_path,
+        'target_file_path':target_file_path})
+    with TemporaryDirectory(prefix='airflowtmp') as tmp_dir:
+        with NamedTemporaryFile(dir=tmp_dir, prefix=self.task_id) as f:
+            f.write(bytes(bash_command, 'utf_8'))
+            f.flush()
+            fname = f.name
+            script_location = tmp_dir + "/" + fname
+            logging.info("Temporary script "
+                         "location :{0}".format(script_location))
+    logging.info("Running command: " + bash_command)
+
+    sp = Popen([bash_command],stdout=PIPE, stderr=STDOUT,preexec_fn=os.setsid)
+    logging.info("Output:")
+    line = ''
+    for line in iter(sp.stdout.readline, b''):
+        line = line.decode('utf-8').strip()
+        logging.info(line)
+
+    sp.wait()
+    logging.info("Command exited with return code {0}".format(sp.returncode))
+
+    if sp.returncode:
+        raise AirflowException("Bash command failed")
+
+    logging.info('Sending SIGTERM signal to bash process group')
+    os.killpg(os.getpgid(sp.pid), signal.SIGTERM)        
+
+    return target_file_path
 
 
+def combine_jpeg_to_video_write_to_syno_cv2(*args, **kwargs):
+    """Decode jpeg files, combine frames and write to mp4 on syno.
+       TODO: THe removal of the source directory fails here.
+    """
+    raw_data_server_dir = kwargs["source_location"]
+    anon_data_syno_dir = kwargs["target_location"]
+    fps = kwargs["fps"]
+    extension = kwargs["extension"]
+
+    ti = kwargs['task_instance']
+    tmp_data_server_dir = ti.xcom_pull(task_ids='split_video_to_jpeg_write_to_server')
+
+    logging.info('{}'.format(tmp_data_server_dir))
+
+    # Get list of images on server and sort according to numeric label
+    images = list_files(**{'source_location':tmp_data_server_dir})
+    images = [image for image in images if image.endswith('.jpg')]
+    
+    images.sort(key = lambda x: int(os.path.splitext(os.path.basename(x))[0]))
+    [logging.info("{}".format(image)) for image in images] #TODO: REMOVE DEBUG
+    
+    if len(images) == 0:
+        return
+    
+    for n, image in enumerate(images):
+
+        #image_path = os.path.join(raw_data_server_dir, image)
+        logging.info("{}".format(image))
+        frame = cv2.imread(image)
+
+        #TODO: Return width/height to 1920x1080 and delete condition
+        # Determine the width and height from the first image
+        if n==0:
+            height, width, channels = frame.shape
+            logging.info('{}'.format(height))
+            logging.info('{}'.format(width))
+            logging.info('{}'.format(channels))
+            # Define the codec and create VideoWriter object
+            fourcc = cv2.VideoWriter_fourcc(*'H264') #cv3 +
+            #fourcc = cv2.cv.CV_FOURCC(*'H264')
+            
+            target_filename = tmp_data_server_dir.replace(raw_data_server_dir,anon_data_syno_dir)+extension
+            target_dir = os.path.dirname(target_filename)
+
+            # cv2.VideoWriter() cannot make directories, so we make them if they do not already exist
+            logging.info('Target directory: {}'.format(target_dir))
+            logging.info('Target filename: {}'.format(target_filename))
+            if not os.path.exists(target_dir):
+                logging.info('Creating directory')
+                os.makedirs(target_dir)
+
+            writer = cv2.VideoWriter(target_dir , fourcc, fps, (width, height)) 
+        
+        writer.write(frame)
+    
+    writer.release()
+    return #TODO: What to return?
+
+def combine_jpeg_to_video_write_to_syno(*args, **kwargs):
+    """Decode jpeg files, combine frames and write to mp4 on syno.
+       TODO: THe removal of the source directory fails here.
+    """
+    raw_data_server_dir = kwargs["source_location"]
+    anon_data_syno_dir = kwargs["target_location"]
+    fps = kwargs["fps"]
+    extension = kwargs["extension"]
+
+    ti = kwargs['task_instance']
+    tmp_data_server_dir = ti.xcom_pull(task_ids='split_video_to_jpeg_write_to_server')
+
+    logging.info('{}'.format(tmp_data_server_dir))
+
+    # Get list of images on server and sort according to numeric label
+    images = list_files(**{'source_location':tmp_data_server_dir})
+    images = [image for image in images if image.endswith('.jpg')]
+    
+    images.sort(key = lambda x: int(os.path.splitext(os.path.basename(x))[0]))
+    #[logging.info("{}".format(image)) for image in images] #TODO: REMOVE DEBUG
+    
+    if len(images) == 0:
+        return
+
+    target_filename = tmp_data_server_dir.replace(raw_data_server_dir,anon_data_syno_dir)+extension
+    kwargs["filename"] = target_filename
+    kwargs["init_path"] = tmp_data_server_dir
+    target_dir = os.path.dirname(target_filename)
+
+    logging.info('Target directory: {}'.format(target_dir))
+    if not os.path.exists(target_dir):
+        logging.info('Creating directory')
+        os.makedirs(target_dir)
+
+    logging.info("Beginning encoding of {}".format(target_filename))
+    command = 'ffmpeg -f image2 -pattern_type glob -framerate {fps} -s 1280x720 -i \'{init_path}/*.jpg\' {filename}'.format(**kwargs)
+    #command = 'ffmpeg -f image2 -framerate {fps} -s 1280x720 -i %06d.jpg {filename}'.format(**kwargs)
+    logging.info("{}".format(command))
+    with open("stdout.txt","wb") as out, open("stderr.txt","wb") as err:
+  
+        p = Popen([command], stdout=out, stderr=err, preexec_fn=os.setsid, shell=True)
+        # p = Popen('while sleep 1; do echo "Hi"; done', stdout=PIPE, stderr=PIPE, shell=True)
+
+        time.sleep(.1)
+        while p.poll() == None:
+            time.sleep(0.1)
+            p.poll()
+
+        #os.killpg(os.getpgid(p.pid), signal.SIGTERM)  # Send the signal to all the process groups
+
+        logging.info("Completed encoding of video file")
+
+    return #TODO: What to return?
+
+
+# Define tasks nodes in DAG
 t_check_new_data_available = PythonOperator(
         task_id='sense_raw_data_hdd',
-        python_callable=identify_raw_data_to_copy,
-        op_kwargs={'source_location': '/usr/local/airflow/hdd',
-                   'target_location': '/usr/local/airflow/syno',
-                   'extension': '.mp4'},
+        python_callable=diff_directories,
+        op_kwargs={'source_location': '/usr/local/airflow/hdd/raw_data',
+                   'target_location': '/usr/local/airflow/syno/raw_data',
+                   'extension': '.mp4',
+                   'ignore_location' : ['#recycle/']},
         dag=dag)
 
 t_move_new_data_to_syno = PythonOperator(
         task_id='move_new_data_to_syno',
-        python_callable=move_data_syno,
+        python_callable=move_files,
         provide_context=True,
-        op_kwargs={'source_location': '/usr/local/airflow/hdd',
-                   'target_location': '/usr/local/airflow/syno'},
+        op_kwargs={'source_location': '/usr/local/airflow/hdd/raw_data',
+                   'target_location': '/usr/local/airflow/syno/raw_data',
+                   'task_id': 'sense_raw_data_hdd'},
         dag=dag)
 
 t_list_jpeg_on_server = PythonOperator(
         task_id='list_jpeg_on_server',
-        python_callable=list_jpeg_on_server,
+        python_callable=list_files,
         op_kwargs={'source_location': '/usr/local/airflow/server'},
         dag=dag)
 
+t_check_unanon_data_available = PythonOperator(
+        task_id='sense_unanon_data_syno',
+        python_callable=diff_directories,
+        op_kwargs={'source_location': '/usr/local/airflow/syno/raw_data',
+                   'target_location': '/usr/local/airflow/syno/anon_data',
+                   'extension': '.mp4',
+                   'ignore_location' : ['#recycle/']},
+        dag=dag)
+
 t_split_to_jpeg_write_to_server = PythonOperator(
-        task_id='split_video_to_jpeg',
+        task_id='split_video_to_jpeg_write_to_server',
         python_callable=split_video_to_jpeg_write_to_server,
         provide_context=True,
-        op_kwargs={'source_location': '/usr/local/airflow/syno',
-                   'target_location': '/usr/local/airflow/server'},
+        op_kwargs={'source_location': '/usr/local/airflow/syno/raw_data',
+                   'target_location': '/usr/local/airflow/server',
+                   'n_jpeg_threshold': 30*60*60*5},
         dag=dag)
 
-t_face_blur = DockerOperator(
-        api_version='1.27',
-        docker_url='tcp://localhost:2375',  # replace it with swarm/docker endpoint
-        image='lukemiller/docker_devenvs:tensorflow_frcnn_faceblurapi',
-        network_mode='bridge',  # place on same network as airflow?
-        volumes=['/your/host/input_dir/path:/your/input_dir/path',
-                 '/your/host/output_dir/path:/your/output_dir/path'],
-        command='./face_blur.sh',
-        task_id='tensorflow_face_blur_processor',
-        xcom_push=True,
-        params={'source_location': '/usr/local/airflow/server',
-                'target_location': '/usr/local/airflow/server'},
+t_face_blur = BashOperator(
+        task_id='tensorflow_face_blur',
+        bash_command='whoami',
+        provide_context=True,
+        op_kwargs={'source_location': '/usr/local/airflow/server'},
         dag=dag)
 
+t_combine_to_video_write_to_syno = PythonOperator(
+        task_id='combine_jpeg_to_video_write_to_syno',
+        python_callable=combine_jpeg_to_video_write_to_syno,
+        provide_context=True,
+        op_kwargs={'source_location': '/usr/local/airflow/server',
+                   'target_location': '/usr/local/airflow/syno/anon_data',
+                   'extension': '.mp4',
+                   'fps': 30.0},
+        dag=dag)
+
+# Set up DAG architecture
 t_move_new_data_to_syno.set_upstream([t_check_new_data_available])
-t_split_to_jpeg_write_to_server.set_upstream([t_move_new_data_to_syno,t_list_jpeg_on_server])
+
+t_check_unanon_data_available.set_upstream([t_move_new_data_to_syno])
+
+t_split_to_jpeg_write_to_server.set_upstream([t_check_unanon_data_available,t_list_jpeg_on_server])
+
+#t_face_blur.set_upstream([t_split_to_jpeg_write_to_server])
+
+t_combine_to_video_write_to_syno.set_upstream([t_split_to_jpeg_write_to_server])
