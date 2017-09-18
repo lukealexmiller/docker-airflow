@@ -109,6 +109,7 @@ services:
     - syno_raw_data:/usr/local/airflow/syno/raw_data
     - syno_anon_data:/usr/local/airflow/syno/anon_data
     - tmp:/usr/local/airflow/server
+    - ./weights:/usr/local/airflow/faster_rcnn/weights
     - nvidia_driver_375.66:/usr/local/nvidia:ro
 version: '2'
 volumes:

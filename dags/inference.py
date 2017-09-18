@@ -1,19 +1,26 @@
 import argparse
 import os
+import sys
 import cv2 #TODO: Repalce OpenCV
 import cPickle
-import logging
 import numpy as np
+import pprint
 import tensorflow as tf
 
-# Add Faster R-CNN path to allow for importing
+# Add Faster R-CNN path to allow for module import
 sys.path.append('/usr/local/airflow/faster_rcnn')
 
 from lib.fast_rcnn.test import im_detect
 from lib.fast_rcnn.config import cfg, cfg_from_file
 from lib.networks.factory import get_network
 from lib.utils.timer import Timer
-from lib.utils.cython_nms import nms, nms_new #TODO: Require both of there?
+from lib.utils.cython_nms import nms
+
+"""Perform inference using a Fast R-CNN network on a folder of images. The
+   detection results are pickled yielding a 3-tensor list with dimensions
+   [n_class,n_images,[xmin,ymin,xmax,ymax,probability]] and saved in the same
+   directory as the images.
+"""
 
 def parse_args():
     """Parse input arguments
@@ -44,11 +51,13 @@ def parse_args():
     return args
 
 def test_net(sess, net, image_dir, num_classes=2, max_per_image=300, thresh=0.05):
-    """Perform inference using a Fast R-CNN network on a folder of images.
-    """
-    images = [name for name in os.listdir(image_dir) if os.path.isfile(os.path.join(image_dir, name))]
+    # Get list of images in image_dir and sort according to numeric label
+    images = [os.path.join(image_dir,name) for name in os.listdir(image_dir) \
+            if os.path.splitext(name)[1] == '.png']
+    images.sort(key = lambda x: int(os.path.splitext(os.path.basename(x))[0]))
     num_images = len(images)
-    logging.info('Running inference on {:s} frame(s) in: {:s}'.format(num_images,image_dir))
+
+    print('Running inference on {:d} frame(s) in: {:s}'.format(num_images,image_dir))
     
     # All detections are collected into:
     #    all_boxes[cls][image] = N x 5 array of detections in
@@ -59,7 +68,7 @@ def test_net(sess, net, image_dir, num_classes=2, max_per_image=300, thresh=0.05
     # Start timers to keep track of inference progress
     _t = {'im_detect' : Timer(), 'misc' : Timer()}
 
-    det_file = os.path.join(image_dir, 'detections.pkl') #TODO: Change path?
+    det_file = os.path.join(image_dir, 'detections.pkl')
     # if os.path.exists(det_file):
     #     with open(det_file, 'rb') as f:
     #         all_boxes = cPickle.load(f)
@@ -68,7 +77,7 @@ def test_net(sess, net, image_dir, num_classes=2, max_per_image=300, thresh=0.05
         # Filter out any ground truth boxes
         box_proposals = None
 
-        im = cv2.imread(images(i))
+        im = cv2.imread(images[i])
 
         _t['im_detect'].tic()
         scores, boxes = im_detect(sess, net, im, box_proposals)
@@ -97,12 +106,12 @@ def test_net(sess, net, image_dir, num_classes=2, max_per_image=300, thresh=0.05
                     all_boxes[j][i] = all_boxes[j][i][keep, :]
         nms_time = _t['misc'].toc(average=False)
 
-        logging.info('im_detect: {:d}/{:d} {:.3f}s {:.3f}s' \
+        print('im_detect: {:d}/{:d} {:.3f}s {:.3f}s' \
               .format(i + 1, num_images, detect_time, nms_time))
 
     # Store detections as pickle file.
     with open(det_file, 'wb') as f:
-        cPickle.dump(all_boxes, f, cPickle.HIGHEST_PROTOCOL) #TODO: Is this the best format?
+        cPickle.dump(all_boxes, f, cPickle.HIGHEST_PROTOCOL)
 
 if __name__ == '__main__':
     args = parse_args()
@@ -110,19 +119,18 @@ if __name__ == '__main__':
 
     # Restrict access to user-defined GPU
     cfg.gpu_id = args.gpu_id
-    logging.info('Restricting access to: /gpu:{:d}'.format(cfg.gpu_id))
+    print('Restricting access to: /gpu:{:d}'.format(cfg.gpu_id))
     os.environ["CUDA_VISIBLE_DEVICES"] = "{:d}".format(cfg.gpu_id)
 
     # Use 4 anchor scales
     cfg.ANCHOR_SCALES = [4,8,16,32]
 
-    logging.info('Using config:') #TODO: Is this really needed?
-    for line in pprint.pformat(cfg).split('\n'):
-        logging.debug(line)
+    print('Using config:')
+    pprint.pprint(cfg)
 
     # Define graph
     network = get_network(args.network_name)
-    logging.info('Loaded network: `{:s}`'.format(args.network_name))
+    print('Loaded network: `{:s}`'.format(args.network_name))
 
     # Extract filename of weights to pass to test_net()
     weights_filename = os.path.splitext(os.path.basename(args.weights))[0]
@@ -132,6 +140,6 @@ if __name__ == '__main__':
     with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
 
         saver.restore(sess, args.weights)
-        logging.info(('Loaded model weights from {:s}').format(args.weights))
+        print('Loaded model weights from {:s}'.format(args.weights))
 
         test_net(sess, network, args.image_dir, args.num_classes)

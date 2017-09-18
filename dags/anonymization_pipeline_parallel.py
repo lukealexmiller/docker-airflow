@@ -21,7 +21,7 @@ default_args = {
 
 # Define DAG scheduling
 dag = DAG(
-        dag_id='anonymization_pipeline_bash',
+        dag_id='anonymization_pipeline_parallel',
         default_args=default_args,
         schedule_interval='@once')
 
@@ -120,15 +120,18 @@ def list_unanon_files(*args, **kwargs):
     source_dir = kwargs["source_location"]
     target_dir = kwargs["target_location"]
     n_frame_threshold = kwargs['n_frame_threshold']
+    unanon_file = kwargs['unanon_file']
 
+    raw_data_server_files = []
+    
     ti = kwargs['task_instance']
-    raw_data_server_files = ti.xcom_pull(task_ids='list_jpeg_on_server')
-    unanon_files = ti.xcom_pull(task_ids='sense_unanon_data_syno')
+    #raw_data_server_files = ti.xcom_pull(task_ids='list_jpeg_on_server_{:d}'.format(num_id))
+    #unanon_files = ti.xcom_pull(task_ids='sense_unanon_data_syno')
 
-    [logging.info("{}".format(file)) for file in unanon_files]
+    #[logging.info("{}".format(file)) for file in unanon_files]
 
-    source_file_path = os.path.join(source_dir,unanon_files[0]) #TODO: How to get a different file? unanon_files[0]
-    target_file_path = os.path.join(target_dir,unanon_files[0])
+    source_file_path = os.path.join(source_dir,unanon_file) #TODO: How to get a different file? unanon_files[0]
+    target_file_path = os.path.join(target_dir,unanon_file)
     target_file_path = os.path.splitext(target_file_path)[0]
 
     logging.info("Number of files currently on the server: \
@@ -153,10 +156,10 @@ def list_unanon_files(*args, **kwargs):
 
 split_video_to_frames_write_to_server = """
     ffmpeg \
-    -i {{task_instance.xcom_pull(task_ids='list_unanon_files', key='source_file_path')}} \
+    -i {{task_instance.xcom_pull(task_ids='list_unanon_files_{params.num_id}', key='source_file_path')}} \
     -f image2 \
     -s {{params.width}}x{{params.height}} \
-    {{task_instance.xcom_pull(task_ids='list_unanon_files', key='target_file_path')}}/%06d.{{params.format}}
+    {{task_instance.xcom_pull(task_ids='list_unanon_files_{params.num_id}', key='target_file_path')}}/%06d.{{params.format}}
 """
 
 
@@ -227,12 +230,14 @@ t_move_new_data_to_syno = PythonOperator(
                    'task_id': 'sense_raw_data_hdd'},
         dag=dag)
 
+"""
 t_list_jpeg_on_server = PythonOperator(
         task_id='list_jpeg_on_server',
         python_callable=list_files,
         op_kwargs={'source_location': '/usr/local/airflow/server'},
         dag=dag)
-
+"""
+"""
 t_check_unanon_data_available = PythonOperator(
         task_id='sense_unanon_data_syno',
         python_callable=diff_directories,
@@ -241,25 +246,48 @@ t_check_unanon_data_available = PythonOperator(
                    'extension': '.mp4',
                    'ignore_location' : ['#recycle/']},
         dag=dag)
+"""
 
-t_list_unanon_files = PythonOperator(
-        task_id='list_unanon_files',
+
+# Set up DAG architecture
+t_move_new_data_to_syno.set_upstream([t_check_new_data_available])
+
+#t_check_unanon_data_available.set_upstream([t_move_new_data_to_syno])
+
+op_kwargs={'source_location': '/usr/local/airflow/syno/raw_data',
+           'target_location': '/usr/local/airflow/syno/anon_data',
+           'extension': '.mp4',
+           'ignore_location' : ['#recycle/']}
+
+unanon_file_list = diff_directories(**op_kwargs)
+
+for i, unanon_file in enumerate(unanon_file_list):
+    t_list_unanon_files = PythonOperator(
+        task_id='list_unanon_files_{:d}'.format(i),
         python_callable=list_unanon_files,
         provide_context=True,
         op_kwargs={'source_location': '/usr/local/airflow/syno/raw_data',
                    'target_location': '/usr/local/airflow/server',
-                   'n_frame_threshold': 30*60*60*5},
+                   'n_frame_threshold': 30*60*60*5,
+                   'unanon_file': unanon_file},
         dag=dag)
 
-t_split_to_frames_write_to_server = BashOperator(
-        task_id='split_video_to_frames_write_to_server',
-        bash_command=split_video_to_frames_write_to_server,
+    t_list_unanon_files.set_upstream([t_move_new_data_to_syno])
+
+    t_split_to_frames_write_to_server = BashOperator(
+        task_id='split_video_to_frames_write_to_server_{:d}'.format(i),
+        bash_command=split_video_to_frames_write_to_server.format(i,i),
         params={'format': 'png',
                 'width': '1280',
-                'height': '720'},
+                'height': '720',
+                'num_id': '{:d}'.format(i)},
         dag=dag)
 
-t_face_detect = BashOperator( # TODO: Add queue assignment
+    t_split_to_frames_write_to_server.set_upstream([t_list_unanon_files])
+
+    """
+
+    t_face_detect = BashOperator( # TODO: Add queue assignment
         task_id='tensorflow_face_detect',
         bash_command=tensorflow_face_detect,
         params={'gpu': 0,
@@ -269,7 +297,7 @@ t_face_detect = BashOperator( # TODO: Add queue assignment
                 'num_classes': 2}, 
         dag=dag)
 
-t_face_blur = BashOperator(
+    t_face_blur = BashOperator(
         task_id='apply_face_blur',
         bash_command=apply_face_blur,
         params={'threshold': 0.5,
@@ -279,14 +307,14 @@ t_face_blur = BashOperator(
                 'compression': 0}, 
         dag=dag)
 
-t_create_anon_dir = PythonOperator(
+    t_create_anon_dir = PythonOperator(
         task_id='create_anon_dir',
         python_callable=create_anon_dir,
         provide_context=True,
         dag=dag)
 
 
-t_combine_to_video_write_to_syno = BashOperator(
+    t_combine_to_video_write_to_syno = BashOperator(
         task_id='combine_frames_to_video_write_to_syno',
         bash_command=combine_frames_to_video_write_to_syno,
         params={'format': 'png',
@@ -295,14 +323,8 @@ t_combine_to_video_write_to_syno = BashOperator(
                 'fps': '30.0'},
         dag=dag)
 
-# Set up DAG architecture
-t_move_new_data_to_syno.set_upstream([t_check_new_data_available])
 
-t_check_unanon_data_available.set_upstream([t_move_new_data_to_syno])
 
-t_list_unanon_files.set_upstream([t_check_unanon_data_available,t_list_jpeg_on_server])
-
-t_split_to_frames_write_to_server.set_upstream([t_list_unanon_files])
 
 t_face_detect.set_upstream([t_split_to_frames_write_to_server])
 
@@ -311,3 +333,5 @@ t_face_blur.set_upstream([t_face_detect])
 t_create_anon_dir.set_upstream([t_face_blur])
 
 t_combine_to_video_write_to_syno.set_upstream([t_create_anon_dir,t_list_unanon_files])
+
+"""
