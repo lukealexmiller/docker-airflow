@@ -8,6 +8,7 @@ services:
     - /dev/nvidia1
     - /dev/nvidiactl
     - /dev/nvidia-uvm
+    - /dev/nvidia-uvm-tools
     environment:
     - EXECUTOR=Celery
     image: lukealexmiller/docker-airflow-gpu:1.8.1
@@ -15,13 +16,14 @@ services:
     - 5555:5555
     restart: always
     volumes:
-    - nvidia_driver_375.66:/usr/local/nvidia:ro
+    - nvidia_driver_384.59:/usr/local/nvidia:ro
   postgres:
     devices:
     - /dev/nvidia0
     - /dev/nvidia1
     - /dev/nvidiactl
     - /dev/nvidia-uvm
+    - /dev/nvidia-uvm-tools
     environment:
     - POSTGRES_USER=airflow
     - POSTGRES_PASSWORD=airflow
@@ -29,16 +31,17 @@ services:
     image: postgres:9.6
     volumes:
     - db-data:/var/lib/postgresql/data
-    - nvidia_driver_375.66:/usr/local/nvidia:ro
+    - nvidia_driver_384.59:/usr/local/nvidia:ro
   redis:
     devices:
     - /dev/nvidia0
     - /dev/nvidia1
     - /dev/nvidiactl
     - /dev/nvidia-uvm
+    - /dev/nvidia-uvm-tools
     image: redis:3.2.7
     volumes:
-    - nvidia_driver_375.66:/usr/local/nvidia:ro
+    - nvidia_driver_384.59:/usr/local/nvidia:ro
   scheduler:
     command: scheduler
     depends_on:
@@ -48,6 +51,7 @@ services:
     - /dev/nvidia1
     - /dev/nvidiactl
     - /dev/nvidia-uvm
+    - /dev/nvidia-uvm-tools
     environment:
     - LOAD_EX=n
     - FERNET_KEY=hBz78Go3mJRJoHsD7Hsv6u7mu0Q4x74IYbMUhlZ1avI=
@@ -61,7 +65,7 @@ services:
     - syno_raw_data:/usr/local/airflow/syno/raw_data
     - syno_anon_data:/usr/local/airflow/syno/anon_data
     - tmp:/usr/local/airflow/server
-    - nvidia_driver_375.66:/usr/local/nvidia:ro
+    - nvidia_driver_384.59:/usr/local/nvidia:ro
   webserver:
     command: webserver
     depends_on:
@@ -72,6 +76,7 @@ services:
     - /dev/nvidia1
     - /dev/nvidiactl
     - /dev/nvidia-uvm
+    - /dev/nvidia-uvm-tools
     environment:
     - LOAD_EX=n
     - FERNET_KEY=hBz78Go3mJRJoHsD7Hsv6u7mu0Q4x74IYbMUhlZ1avI=
@@ -87,7 +92,7 @@ services:
     - syno_raw_data:/usr/local/airflow/syno/raw_data
     - syno_anon_data:/usr/local/airflow/syno/anon_data
     - tmp:/usr/local/airflow/server
-    - nvidia_driver_375.66:/usr/local/nvidia:ro
+    - nvidia_driver_384.59:/usr/local/nvidia:ro
   worker:
     command: worker
     depends_on:
@@ -97,6 +102,7 @@ services:
     - /dev/nvidia1
     - /dev/nvidiactl
     - /dev/nvidia-uvm
+    - /dev/nvidia-uvm-tools
     environment:
     - FERNET_KEY=hBz78Go3mJRJoHsD7Hsv6u7mu0Q4x74IYbMUhlZ1avI=
     - EXECUTOR=Celery
@@ -110,12 +116,12 @@ services:
     - syno_anon_data:/usr/local/airflow/syno/anon_data
     - tmp:/usr/local/airflow/server
     - ./weights:/usr/local/airflow/faster_rcnn/weights
-    - nvidia_driver_375.66:/usr/local/nvidia:ro
+    - nvidia_driver_384.59:/usr/local/nvidia:ro
 version: '2'
 volumes:
   db-data:
     driver: local
-  nvidia_driver_375.66:
+  nvidia_driver_384.59:
     external: true
   syno_anon_data:
     driver: cifs
